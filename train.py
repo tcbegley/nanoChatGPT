@@ -30,8 +30,6 @@ import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
 from trainers.trainer import Trainer
 
-
-
 # load config.yaml from current directory
 with open('config/config.yaml') as f:
     conf = yaml.load(f, Loader=yaml.FullLoader)

@@ -34,6 +34,11 @@ $ python train_reward_model.py
 
 Which uses the reddit tldr dataset. The pipes should work but I have not actually finetuned this at all.
 
+References:
+
+https://arxiv.org/pdf/1611.01144.pdf
+https://arxiv.org/abs/2203.02155
+
 Below is Andrej Karpathy's original README
 ________
 

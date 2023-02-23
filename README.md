@@ -5,8 +5,10 @@ A crude RLHF layer on top of nanoGPT to test an idea I had that you can backprop
 Prepare data:
 
 ```
-python data/shakespeare/prepare.py
+$ python data/shakespeare/prepare.py
 ```
+
+Once data is prepared start training
 
 ```
 $ python train.py # settings in config/config.yaml

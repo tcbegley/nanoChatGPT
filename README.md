@@ -42,7 +42,7 @@ https://arxiv.org/pdf/1611.01144.pdf
 InstructGPT
 https://arxiv.org/abs/2203.02155
 
-Below is Andrej Karpathy's original README
+Below is Andrej Karpathy's original README, make sure you have installed the revelevant packages
 ________
 
 # nanoGPT

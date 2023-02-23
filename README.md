@@ -2,6 +2,12 @@
 
 A crude RLHF layer on top of nanoGPT to test an idea I had that you can backpropagate through the reward function rather than use policy gradient. I have verified it works for a very basic example where you incentivise the network to produce words containing 'and'. The trick is to use the Straight-Through Gumbel-Softmax estimator.
 
+Prepare data:
+
+```
+python data/shakespeare/prepare.py
+```
+
 ```
 $ python train.py # settings in config/config.yaml
 ```

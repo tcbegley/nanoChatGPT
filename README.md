@@ -8,7 +8,7 @@ Prepare data:
 $ python data/shakespeare/prepare.py
 ```
 
-Once data is prepared start training
+Once data is prepared start training. The configs assume cuda, if you don't have a gpu change to cpu in config.
 
 ```
 $ python train.py # settings in config/config.yaml

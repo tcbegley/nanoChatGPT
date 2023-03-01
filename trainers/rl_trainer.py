@@ -181,7 +181,6 @@ class GumbelTrainer(Trainer):
             
             states, rewards = rl_model.generate_gumbel(X, self.config['episode_length'], self.device, self.block_size, reward_model=reward_model)
 
-
             loss = -rewards.mean()
             gumbel_optimizer.zero_grad(set_to_none=True)
             loss.backward()

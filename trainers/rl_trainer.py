@@ -182,8 +182,6 @@ class GumbelTrainer(Trainer):
         t0  = time.time()
         for iter in range(max_iters):
             
-            states, rewards = rl_model.generate_gumbel(X, self.config['episode_length'], self.device, self.block_size, reward_model=reward_model)
-
             for micro_step in range(self.gradient_accumulation_steps):
                 if self.ddp:
                     # in DDP training we only need to sync gradients at the last micro step.

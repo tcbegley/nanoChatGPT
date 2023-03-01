@@ -188,7 +188,7 @@ class GumbelTrainer(Trainer):
                     # the official way to do this is with model.no_sync() context manager, but
                     # I really dislike that this bloats the code and forces us to repeat code
                     # looking at the source of that context manager, it just toggles this variable
-                    model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1)
+                    rl_model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1)
                 with ctx:
                     states, rewards = rl_model.generate_gumbel(X, self.config['episode_length'], self.device, self.block_size, reward_model=reward_model)
                     mean_reward = rewards.mean()
@@ -201,7 +201,7 @@ class GumbelTrainer(Trainer):
             # clip the gradient
             if self.grad_clip != 0.0:
                 scaler.unscale_(gumbel_optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), self.grad_clip)
+                torch.nn.utils.clip_grad_norm_(rl_model.parameters(), self.grad_clip)
             # step the optimizer and scaler if training in fp16
             scaler.step(gumbel_optimizer)
             scaler.update()

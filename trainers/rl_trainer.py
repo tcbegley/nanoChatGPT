@@ -118,15 +118,19 @@ class GumbelTrainer(Trainer):
         # model init
         model = self.init_model()
 
-        model = RLHF(model, self.mode, discrete_reward=self.config['discrete_reward'])
+        rl_model = RLHF(model, self.mode, discrete_reward=self.config['discrete_reward'])
+
+
+        # The current approach is to use a separate reward model because otherwise optimisation of the reward model changes upstream parameters impacting performance of the multihead
+        # I therefore load the language model from 'out_dir' and the reward model from 'out_dir_multihead'
 
         if self.config['init_multihead_from'] == 'scratch':
             print("initializing multihead from scratch")
         else:
             if self.config['init_multihead_from'] == 'resume':
-                print(f"Resuming training from {self.config['out_dir_multihead']}")
+                print(f"Resuming training from {self.config['out_dir']}")
                 # resume training from a checkpoint.
-                ckpt_path = os.path.join(self.config['out_dir_multihead'], 'ckpt.pt')
+                ckpt_path = os.path.join(self.config['out_dir'], 'ckpt.pt')
                 checkpoint = torch.load(ckpt_path, map_location=self.device)      
                 state_dict = checkpoint['model']
                 # fix the keys of the state dictionary :(
@@ -142,21 +146,40 @@ class GumbelTrainer(Trainer):
             print('Reward model instantiated as copy')
             import copy
             reward_model = copy.deepcopy(model)
+
+            print(f"Resuming reward model from {self.config['out_dir_multihead']}")
+
+            reward_model = RLHF(reward_model, self.mode, discrete_reward=self.config['discrete_reward'])
+            # resume training from a checkpoint.
+            ckpt_path = os.path.join(self.config['out_dir_multihead'], 'ckpt.pt')
+            checkpoint = torch.load(ckpt_path, map_location=self.device)      
+            state_dict = checkpoint['model']
+            # fix the keys of the state dictionary :(
+            # honestly no idea how checkpoints sometimes get this prefix, have to debug more
+            unwanted_prefix = '_orig_mod.'
+            for k,v in list(state_dict.items()):
+                if k.startswith(unwanted_prefix):
+                    state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+            reward_model.load_state_dict(state_dict)
         else:
-            reward_model = model
-        model.to(self.device)
+            reward_model = rl_model
+        rl_model.to(self.device)
         reward_model.to(self.device)
 
         gumbel_optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
         last_time = time.time()
         rews_all = []
-        max_iters = 100000
+        max_iters = 100000     
+        
         X, Y = self.get_batch('train') # fetch the very first batch
+
+        X = torch.zeros((X.shape[0], 1), dtype=torch.long).to(self.device) # for now there is no prompt
+
         t0  = time.time()
         for iter in range(max_iters):
             
-            states, rewards = model.generate_gumbel(X, self.block_size, self.device, self.block_size, reward_model=reward_model)
+            states, rewards = rl_model.generate_gumbel(X, self.config['episode_length'], self.device, self.block_size, reward_model=reward_model)
 
 
             loss = -rewards.mean()
@@ -175,7 +198,7 @@ class GumbelTrainer(Trainer):
                 current_time = time.time()
                 # print(current_time - last_time)
                 last_time = current_time
-                text = model.generate(X, self.block_size, self.device, self.block_size, reward_model=reward_model)[0]
+                text = rl_model.generate(X, self.config['episode_length'], self.device, self.block_size, reward_model=reward_model)[0]
                 for i in range(1):
                     text_i = text[i,:]
                     # print(reward(text_i))

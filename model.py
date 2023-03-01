@@ -376,14 +376,11 @@ class RLHF(nn.Module):
         # reward model
         self.n_embd = model.lm_head.in_features
         self.block_size = model.config.block_size
-        # model.reward_head = nn.Sequential(nn.Linear(self.n_embd*self.block_size, self.n_embd*self.block_size), nn.ReLU(), nn.Linear(self.n_embd*self.block_size, 1, bias=False))
         model.policy_head = nn.Linear(model.lm_head.in_features, model.lm_head.out_features, bias=False)
-        # model.policy_head = 
         self.mode = mode
         self.discrete_reward = discrete_reward
         if discrete_reward:
-            # probability over two categories, [1, 0] is no reward, [0, 1] is reward
-            model.reward_head = nn.Linear(self.n_embd*self.block_size, 2, bias=False)
+            model.reward_head = nn.Linear(model.lm_head.in_features, 2, bias=False)
         else:
             model.reward_head = nn.Linear(self.n_embd*self.block_size, 1, bias=False)
     
@@ -400,9 +397,8 @@ class RLHF(nn.Module):
         for block in self.model.transformer.h:
             x = block(x)
         x = self.model.transformer.ln_f(x)
-        x = x.view(b, self.block_size*self.n_embd)
 
-        rewards = self.model.reward_head(x)
+        rewards = self.model.reward_head(x[:, -1, :])
 
         if self.discrete_reward:
             probs = torch.softmax(rewards,1)
@@ -418,8 +414,6 @@ class RLHF(nn.Module):
     def forward(self, idx, targets=None):
         if self.mode == 'reward':
             return self.forward_reward(idx, targets)
-        elif self.mode == 'policy':
-            return self.forward_policy(idx, targets)
         else:
             return self.model(idx, targets)
     
@@ -528,7 +522,7 @@ class RLHF(nn.Module):
 
                     
             
-        return idx[:,-max_new_tokens:], log_probs[:,-max_new_tokens:], log_probs_ref[:,-max_new_tokens:], rewards, advantages_all
+        return idx, log_probs[:,-max_new_tokens:], log_probs_ref[:,-max_new_tokens:], rewards, advantages_all
     
     def generate_gumbel(self, idx, max_new_tokens, device, block_size, reward_model, use_reference=True):
         
@@ -610,9 +604,8 @@ class RLHF(nn.Module):
         for block in self.model.transformer.h:
             x = block(x)
         x = self.model.transformer.ln_f(x)
-        x = x.view(b, self.block_size*self.n_embd)
 
-        rewards = self.model.reward_head(x)
+        rewards = self.model.reward_head(x[:, -1, :])
 
         if self.discrete_reward:
             probs = torch.softmax(rewards,1)

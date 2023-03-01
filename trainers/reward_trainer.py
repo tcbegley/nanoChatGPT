@@ -110,9 +110,8 @@ class RewardModelTrainer(Trainer):
     
         model.to(self.device)
 
-        self.optimizer = torch.optim.AdamW(model.model.reward_head.parameters(), lr=1e-3)
-        print(model.model.reward_head)
-        # self.optimizer = torch.optim.AdamW(model.model.parameters(), lr=1e-4)
+        # self.optimizer = torch.optim.AdamW(model.model.reward_head.parameters(), lr=1e-3)
+        self.optimizer = torch.optim.AdamW(model.model.parameters(), lr=1e-4)
 
         model = self.setup_model(model)
 

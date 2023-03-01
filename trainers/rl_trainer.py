@@ -166,7 +166,10 @@ class GumbelTrainer(Trainer):
         rl_model.to(self.device)
         reward_model.to(self.device)
 
-        gumbel_optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        gumbel_optimizer = torch.optim.AdamW(rl_model.parameters(), lr=1e-3)
+
+        # initialize a GradScaler. If enabled=False scaler is a no-op
+        scaler = torch.cuda.amp.GradScaler(enabled=(self.dtype == 'float16'))
 
         last_time = time.time()
         rews_all = []
@@ -181,19 +184,38 @@ class GumbelTrainer(Trainer):
             
             states, rewards = rl_model.generate_gumbel(X, self.config['episode_length'], self.device, self.block_size, reward_model=reward_model)
 
-            loss = -rewards.mean()
+            for micro_step in range(self.gradient_accumulation_steps):
+                if self.ddp:
+                    # in DDP training we only need to sync gradients at the last micro step.
+                    # the official way to do this is with model.no_sync() context manager, but
+                    # I really dislike that this bloats the code and forces us to repeat code
+                    # looking at the source of that context manager, it just toggles this variable
+                    model.require_backward_grad_sync = (micro_step == self.gradient_accumulation_steps - 1)
+                with ctx:
+                    states, rewards = rl_model.generate_gumbel(X, self.config['episode_length'], self.device, self.block_size, reward_model=reward_model)
+                    mean_reward = rewards.mean()
+                    loss = -mean_reward
+                    # # immediately async prefetch next batch while model is doing the forward pass on the GPU
+                    # X, Y = self.get_batch('train')
+                    # backward pass, with gradient scaling if training in fp16
+                    scaler.scale(loss).backward()
+
+            # clip the gradient
+            if self.grad_clip != 0.0:
+                scaler.unscale_(gumbel_optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), self.grad_clip)
+            # step the optimizer and scaler if training in fp16
+            scaler.step(gumbel_optimizer)
+            scaler.update()
+            # flush the gradients as soon as we can, no need for this memory anymore
             gumbel_optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            gumbel_optimizer.step()
 
-            torch.mean(rewards)
-
-            rews_all.append(rewards.mean().detach().cpu().numpy())
-
-            if iter % 1000 == 0:
+            rews_all.append(mean_reward.detach().cpu().numpy())
+            eval_interval = self.config['eval_interval']
+            if iter % eval_interval == 0:
                 t1 = time.time()
                 print(f'iter: {iter}, time: {t1-t0}')
-                print(f'rets: {np.mean(rews_all[-1000:])}')
+                print(f'rets: {np.mean(rews_all[-eval_interval:])}')
                 current_time = time.time()
                 # print(current_time - last_time)
                 last_time = current_time

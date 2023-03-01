@@ -511,7 +511,7 @@ class RLHF(nn.Module):
 
             # focus only on the last time step
             logits = logits[:, -1, :] # becomes (B, C)
-            # apply softmax to get probabilities
+
             
             #gumbel sample
             idx_next, onehot_next = self.gumbel_softmax(logits, tau=1, device=idx.device)

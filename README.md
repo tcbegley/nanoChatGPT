@@ -2,6 +2,8 @@
 
 A crude RLHF (Reinforcement Learing from Human Feedback) layer on top of nanoGPT to test an idea I had that you can backpropagate through the reward function rather than use policy gradient. I have verified it works for a very basic example where you incentivise the network to produce words containing 'and'. The trick is to use the Straight-Through Gumbel-Softmax estimator.
 
+Also checkout chatgpt_dev_teaching.ipynb and the YouTube video explaining fine-tuning with RL: https://m.youtube.com/watch?v=soqTT0o1ZKo 
+
 Prepare data:
 
 ```

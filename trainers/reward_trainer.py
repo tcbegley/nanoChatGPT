@@ -2,10 +2,11 @@ import os
 import time
 
 import numpy as np
+import tiktoken
 import torch
 import wandb
 from torch.distributed import destroy_process_group
-from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
 
 from model import RLHF
 from trainers.trainer import Trainer
@@ -15,12 +16,8 @@ from trainers.trainer import Trainer
 class RewardModelTrainer(Trainer):
     def __init__(self, config, train_data, val_data, collate_fn):
         super().__init__(config)
-        import tiktoken
-
         self.enc = tiktoken.get_encoding("gpt2")
         self.mode = "reward"
-        from torch.utils.data import DataLoader
-
         train_dataloader = DataLoader(
             train_data, batch_size=self.batch_size, shuffle=True, collate_fn=collate_fn
         )
@@ -32,16 +29,7 @@ class RewardModelTrainer(Trainer):
 
     def get_batch(self, split):
         dataloader = self.train_dataloader if split == "train" else self.val_dataloader
-        batch = next(iter(dataloader))
-        x, y = batch["chosen_ids"], batch["rejected_ids"]
-        if self.device_type == "cuda":
-            # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-            x, y = x.pin_memory().to(self.device, non_blocking=True), y.pin_memory().to(
-                self.device, non_blocking=True
-            )
-        else:
-            x, y = x.to(self.device), y.to(self.device)
-        return x, y
+        return next(iter(dataloader))
 
     # helps estimate an arbitrarily accurate loss over either split using many batches
     @torch.no_grad()
@@ -51,10 +39,10 @@ class RewardModelTrainer(Trainer):
         for split in ["train", "val"]:
             losses = torch.zeros(self.eval_iters)
             for k in range(self.eval_iters):
-                chosen, rejected = self.get_batch(split)
+                batch = self.get_batch(split)
                 with ctx:
-                    reward_chosen = model(chosen)
-                    reward_rejected = model(rejected)
+                    reward_chosen = model(batch.chosens)
+                    reward_rejected = model(batch.rejecteds)
                     loss = -torch.log(
                         torch.sigmoid(reward_chosen - reward_rejected)
                     ).mean()
@@ -140,7 +128,6 @@ class RewardModelTrainer(Trainer):
             )
 
         # training loop
-        chosen, rejected = self.get_batch("train")  # fetch the very first batch
         t0 = time.time()
         local_iter_num = 0  # number of iterations in the lifetime of this process
         self.running_mfu = -1.0
@@ -160,11 +147,11 @@ class RewardModelTrainer(Trainer):
                 break
 
             # sample a batch of data
-            chosen, rejected = self.get_batch("train")
+            batch = self.get_batch("train")
 
             # evaluate the loss
-            reward_chosen = model(chosen)
-            reward_rejected = model(rejected)
+            reward_chosen = model(batch.chosens)
+            reward_rejected = model(batch.rejecteds)
             loss = -torch.log(torch.sigmoid(reward_chosen - reward_rejected)).mean()
 
             self.optimizer.zero_grad(set_to_none=True)
@@ -186,12 +173,11 @@ class RewardModelTrainer(Trainer):
             destroy_process_group()
 
 
-# This one is for reward models which output a probability of reward directly from a given text (no comparison)
+# This one is for reward models which output a probability of reward directly from a
+# given text (no comparison)
 class ProbRewardModelTrainer(Trainer):
     def __init__(self, config, discrete_reward=False):
         super().__init__(config)
-        import tiktoken
-
         self.enc = tiktoken.get_encoding("gpt2")
         self.mode = "reward"
         self.discrete_reward = discrete_reward

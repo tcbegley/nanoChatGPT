@@ -1,100 +1,107 @@
 import tiktoken
 import torch
+import torch.nn as nn
 import yaml
 from datasets import load_dataset
-from torch.utils.data import Dataset
+from tensordict import MemmapTensor
+from tensordict.prototype import tensorclass
 from tqdm import tqdm
 
 from trainers.reward_trainer import RewardModelTrainer
 
 # with inspiration from CarperAI's trlx library
 
-with open("config/config_reward.yaml") as f:
-    conf = yaml.load(f, Loader=yaml.FullLoader)
-    # nested dictionary structure
-    config = {}
-    for k, v in conf.items():
-        for k2, v2 in v.items():
-            config[k2] = v2
-print(config)
+
+def load_config():
+    with open("config/config_reward.yaml") as f:
+        conf = yaml.load(f, Loader=yaml.FullLoader)
+        # nested dictionary structure
+        config = {}
+        for v in conf.values():
+            for k2, v2 in v.items():
+                config[k2] = v2
+
+    return config
 
 
-def create_comparison_dataset(
-    path="CarperAI/openai_summarize_comparisons", split="train"
-):
-    dataset = load_dataset(path, split=split)
-    pairs = []
-    for sample in tqdm(dataset):
-        pair = {}
-        prompt = sample["prompt"]
-        chosen_summary = sample["chosen"]
-        rejected_summary = sample["rejected"]
-        if chosen_summary == rejected_summary:
-            continue
-        if len(chosen_summary.split()) < 5 or len(rejected_summary.split()) < 5:
-            continue
-        pair["chosen"] = prompt + "\n" + chosen_summary
-        pair["rejected"] = prompt + "\n" + rejected_summary
-        pairs.append(pair)
-    return pairs
+@tensorclass
+class PairwiseDataset:
+    chosens: torch.Tensor
+    rejecteds: torch.Tensor
 
-
-class PairwiseDataset(Dataset):
-    def __init__(self, pairs, max_length):
-        # self.chosen_input_ids = []
-        # self.chosen_attn_masks = []
-        # self.rejected_input_ids = []
-        # self.rejected_attn_masks = []
-        self.chosens = []
-        self.rejecteds = []
-        self.enc = tiktoken.get_encoding("gpt2")
-        for pair in tqdm(pairs):
-            chosen_enc = self.enc.encode(
-                "<|startoftext|>" + pair["chosen"] + "<|endoftext|>",
-                allowed_special="all",
-            )[-max_length:]
-            rejected_enc = self.enc.encode(
-                "<|startoftext|>" + pair["rejected"] + "<|endoftext|>",
-                allowed_special="all",
-            )[-max_length:]
-            self.chosens.append(chosen_enc)
-            self.rejecteds.append(rejected_enc)
-
-    def __len__(self):
-        return len(self.chosens)
-
-    def __getitem__(self, idx):
-        return (
-            self.chosens[idx],
-            self.rejecteds[idx],
+    @classmethod
+    def from_dataset(cls, dataset, max_length):
+        data = cls(
+            chosens=MemmapTensor(len(dataset), max_length, dtype=torch.int16),
+            rejecteds=MemmapTensor(len(dataset), max_length, dtype=torch.int16),
+            batch_size=[len(dataset)],
         )
+        enc = tiktoken.get_encoding("gpt2")
+        i = 0
+
+        for sample in tqdm(dataset, total=len(dataset)):
+            prompt = sample["prompt"]
+            chosen = sample["chosen"]
+            rejected = sample["rejected"]
+
+            if (
+                chosen == rejected
+                or len(chosen.split()) < 5
+                or len(rejected.split()) < 5
+            ):
+                continue
+
+            chosen = "\n".join([prompt, chosen])
+            rejected = "\n".join([prompt, rejected])
+
+            chosen = enc.encode(
+                "<|startoftext|>" + chosen + "<|endoftext|>", allowed_special="all"
+            )[-max_length:]
+            rejected = enc.encode(
+                "<|startoftext|>" + rejected + "<|endoftext|>", allowed_special="all"
+            )[-max_length:]
+
+            data[i] = cls(chosens=chosen, rejecteds=rejected, batch_size=[])
+            i += 1
+
+        # TODO: we might have skipped some samples and hence not fully populated the
+        # memmap, so we need to cut off the unused rows to avoid training with them
+        return data
 
 
-class DataCollatorReward:
-    def __call__(self, data):
-        batch = {}
-        batch["chosen_ids"] = torch.tensor([f[0] for f in data])
-        batch["rejected_ids"] = torch.tensor([f[1] for f in data])
-        return batch
+class Collate(nn.Module):
+    def __init__(self, device="cpu"):
+        super().__init__()
+        self.device = torch.device(device)
+
+    def __call__(self, batch):
+        if self.device.type == "cuda":
+            out = batch.apply(lambda x: x.as_tensor()).pin_memory()
+        else:
+            out = batch.apply(lambda x: x.as_tensor())
+
+        return out.to(self.device)
 
 
-def collate_fn(data):
-    batch = {}
-    batch["chosen_ids"] = torch.tensor([f[0] for f in data])
-    batch["rejected_ids"] = torch.tensor([f[1] for f in data])
-    return batch
+if __name__ == "__main__":
+    print("Loading config")
+    config = load_config()
+    print(config, end="\n\n")
 
+    # Make pairwise datasets for training
+    print("Creating pairwise datasets")
+    data_path = "CarperAI/openai_summarize_comparisons"
+    train_dataset = PairwiseDataset.from_dataset(
+        load_dataset(data_path, split="train"), max_length=config["block_size"]
+    )
+    val_dataset = PairwiseDataset.from_dataset(
+        load_dataset(data_path, split="test"), max_length=config["block_size"]
+    )
 
-data_path = "CarperAI/openai_summarize_comparisons"
-train_pairs = create_comparison_dataset(data_path, "train")
-val_pairs = create_comparison_dataset(data_path, "test")
+    print("Creating trainer")
+    trainer = RewardModelTrainer(
+        config, train_dataset, val_dataset, collate_fn=Collate()
+    )
 
-
-# Make pairwise datasets for training
-print("Creating pairwise datasets")
-train_dataset = PairwiseDataset(train_pairs, max_length=config["block_size"])
-val_dataset = PairwiseDataset(val_pairs, max_length=config["block_size"])
-
-trainer = RewardModelTrainer(config, train_dataset, val_dataset, collate_fn=collate_fn)
-
-trainer.train()
+    print("Training")
+    trainer.train()

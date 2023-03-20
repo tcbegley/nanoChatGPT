@@ -1,0 +1,11 @@
+# python artifacts
+__pycache__
+*.egg-info
+*.so
+
+# data
+*.txt
+*.bin
+
+# modelling artifacts
+*.pt

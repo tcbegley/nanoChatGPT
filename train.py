@@ -16,25 +16,25 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 (If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
 """
 
-import os
-import time
 import math
+import os
 import pickle
+import time
 from contextlib import nullcontext
 
 import numpy as np
 import torch
-
-from model import GPTConfig, GPT
 import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
+
+from model import GPT, GPTConfig
 from trainers.trainer import Trainer
 
 # load config.yaml from current directory
-with open('config/config.yaml') as f:
+with open("config/config.yaml") as f:
     conf = yaml.load(f, Loader=yaml.FullLoader)
     # nested dictionary structure
-    config = {}               
+    config = {}
     for k, v in conf.items():
         for k2, v2 in v.items():
             config[k2] = v2

@@ -182,36 +182,6 @@ class ProbRewardModelTrainer(Trainer):
         self.mode = "reward"
         self.discrete_reward = discrete_reward
 
-    def get_batch(self, split):
-        # generate a small batch of data of inputs x and targets y
-        data = self.train_data if split == "train" else self.val_data
-        ix = torch.randint(len(data) - self.block_size, (self.batch_size,))
-        x = torch.stack(
-            [
-                torch.from_numpy((data[i : i + self.block_size]).astype(np.int64))
-                for i in ix
-            ]
-        )
-        y = torch.stack(
-            [
-                self.reward(
-                    torch.from_numpy(
-                        (data[i + 1 : i + 1 + self.block_size]).astype(np.int64)
-                    )
-                )
-                for i in ix
-            ]
-        )
-
-        if self.device_type == "cuda":
-            # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-            x, y = x.pin_memory().to(self.device, non_blocking=True), y.pin_memory().to(
-                self.device, non_blocking=True
-            )
-        else:
-            x, y = x.to(self.device), y.to(self.device)
-        return x, y
-
     def reward(self, sequence, t="and"):
         if t in self.enc.decode(sequence.tolist()):
             # print('hello')
@@ -335,7 +305,7 @@ class ProbRewardModelTrainer(Trainer):
             )
 
         # training loop
-        X, Y = self.get_batch("train")  # fetch the very first batch
+        batch = self.get_batch("train")  # fetch the very first batch
         t0 = time.time()
         local_iter_num = 0  # number of iterations in the lifetime of this process
         self.running_mfu = -1.0
@@ -348,16 +318,16 @@ class ProbRewardModelTrainer(Trainer):
 
             # every once in a while evaluate the loss on train and val sets
             if self.iter_num % self.eval_interval == 0 and self.master_process:
-                self.evaluate(model, ctx, X, lr)
+                self.evaluate(model, ctx, batch.prompt, lr)
 
             if self.iter_num == 0 and self.eval_only:
                 break
 
             # sample a batch of data
-            X, Y = self.get_batch("train")
+            batch = self.get_batch("train")
 
             # evaluate the loss
-            logits, loss = model(X, Y)
+            logits, loss = model(batch.prompt, batch.target)
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
             self.optimizer.step()

@@ -25,8 +25,8 @@ print(f"train has {len(train_ids):,} tokens")
 print(f"val has {len(val_ids):,} tokens")
 
 # export to bin files
-train_ids = np.array(train_ids, dtype=np.uint16)
-val_ids = np.array(val_ids, dtype=np.uint16)
+train_ids = np.array(train_ids, dtype=np.int32)
+val_ids = np.array(val_ids, dtype=np.int32)
 train_ids.tofile(os.path.join(os.path.dirname(__file__), "train.bin"))
 val_ids.tofile(os.path.join(os.path.dirname(__file__), "val.bin"))
 

@@ -233,7 +233,8 @@ class Trainer:
             self.model_args[
                 "block_size"
             ] = self.block_size  # so that the checkpoint will have the right value
-
+        from tensordict.nn import TensorDictModule
+        model = TensorDictModule(model, in_keys=["prompt", "target"], out_keys=["logits", "loss"])
         return model
 
     def setup(self):
@@ -304,7 +305,6 @@ class Trainer:
         # wrap model into DDP container
         if self.ddp:
             model = DDP(model, device_ids=[self.ddp_local_rank])
-
         return model
 
     def evaluate(self, model, ctx, lr):
@@ -401,12 +401,12 @@ class Trainer:
                         micro_step == self.gradient_accumulation_steps - 1
                     )
                 with ctx:
-                    # TODO: use TensorDictModule
-                    logits, loss = model(batch.prompt, batch.target)
+                    batch = model(batch)
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                batch = self.get_batch("train")
+                batch_next = self.get_batch("train")
                 # backward pass, with gradient scaling if training in fp16
-                scaler.scale(loss).backward()
+                scaler.scale(batch.loss).backward()
+                batch = batch_next
             # clip the gradient
             if self.grad_clip != 0.0:
                 scaler.unscale_(self.optimizer)
@@ -456,8 +456,8 @@ class Trainer:
             for k in range(self.eval_iters):
                 batch = self.get_batch(split)
                 with ctx:
-                    logits, loss = model(batch.prompt, batch.target)
-                losses[k] = loss.item()
+                    batch = model(batch)
+                losses[k] = batch.loss.item()
             out[split] = losses.mean()
         model.train()
         return out

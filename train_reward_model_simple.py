@@ -1,19 +1,14 @@
-import tiktoken
-import torch
-import yaml
-from tqdm import tqdm
+import os
+from distutils.util import strtobool
 
 from trainers.reward_trainer import ProbRewardModelTrainer
 
-with open("config/config_reward.yaml") as f:
-    conf = yaml.load(f, Loader=yaml.FullLoader)
-    # nested dictionary structure
-    config = {}
-    for k, v in conf.items():
-        for k2, v2 in v.items():
-            config[k2] = v2
-print(config)
+USE_GPU = strtobool(os.environ.get("USE_GPU", "true"))
+
+if USE_GPU:
+    config = "config/config_reward.yaml"
+else:
+    config = "config/config_reward_cpu.yaml"
 
 trainer = ProbRewardModelTrainer(config, discrete_reward=True)
-
 trainer.train()

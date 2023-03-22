@@ -11,6 +11,8 @@ from torch.utils.data import DataLoader
 from model import RLHF
 from trainers.trainer import Trainer
 
+from tensordict.prototype import tensorclass
+
 
 # This one for reward models similar to InstructGPT paper (rewards based on comparisons)
 class RewardModelTrainer(Trainer):
@@ -173,6 +175,12 @@ class RewardModelTrainer(Trainer):
             destroy_process_group()
 
 
+@tensorclass
+class RewardData:
+    prompt: torch.Tensor
+    reward: torch.Tensor
+
+
 # This one is for reward models which output a probability of reward directly from a
 # given text (no comparison)
 class ProbRewardModelTrainer(Trainer):
@@ -181,6 +189,16 @@ class ProbRewardModelTrainer(Trainer):
         self.enc = tiktoken.get_encoding("gpt2")
         self.mode = "reward"
         self.discrete_reward = discrete_reward
+
+    def get_batch(self, split):
+        batch = super().get_batch(split)
+        return RewardData(
+            prompt=batch.prompt,
+            reward=torch.stack(
+                [self.reward(row) for row in batch.target.unbind(0)], dim=0
+            ),
+            batch_size=[len(batch)],
+        )
 
     def reward(self, sequence, t="and"):
         if t in self.enc.decode(sequence.tolist()):
@@ -327,7 +345,7 @@ class ProbRewardModelTrainer(Trainer):
             batch = self.get_batch("train")
 
             # evaluate the loss
-            logits, loss = model(batch.prompt, batch.target)
+            logits, loss = model(batch.prompt, batch.reward)
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
             self.optimizer.step()
@@ -345,3 +363,20 @@ class ProbRewardModelTrainer(Trainer):
 
         if self.ddp:
             destroy_process_group()
+
+    # TODO: this won't be necessary once model has been wrapped with TensorDictModule
+    # helps estimate an arbitrarily accurate loss over either split using many batches
+    @torch.no_grad()
+    def estimate_loss(self, model, ctx):
+        out = {}
+        model.eval()
+        for split in ["train", "val"]:
+            losses = torch.zeros(self.eval_iters)
+            for k in range(self.eval_iters):
+                batch = self.get_batch(split)
+                with ctx:
+                    logits, loss = model(batch.prompt, batch.reward)
+                losses[k] = loss.item()
+            out[split] = losses.mean()
+        model.train()
+        return out

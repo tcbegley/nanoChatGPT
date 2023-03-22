@@ -34,41 +34,25 @@ class Data:
     prompt: torch.Tensor
     target: torch.Tensor
 
-    @classmethod
-    def from_file(cls, path, batch_size=128):
-        mm = np.memmap(path, dtype=np.int32, mode="r+")
-        n_tokens = len(mm)
-
-        data = cls(
-            prompt=MemmapTensor(n_tokens - 1, dtype=torch.int32),
-            target=MemmapTensor(n_tokens - 1, dtype=torch.int32),
-            batch_size=[n_tokens - 1],
-        )
-
-        for i in range(0, n_tokens, batch_size):
-            if i + batch_size >= n_tokens:
-                # final batch should not contain the last token
-                prompt = torch.from_numpy(mm[i:-1])
-            else:
-                prompt = torch.from_numpy(mm[i : i + batch_size])
-            target = torch.from_numpy(mm[i + 1 : i + batch_size + 1])
-            data[i : i + batch_size] = cls(
-                prompt=prompt, target=target, batch_size=[len(target)]
-            )
-
-        return data
-
 
 class PairedDataset(Dataset):
-    def __init__(self, data, block_size):
-        self.data = data
+    def __init__(self, path, block_size):
+        self._memmap = np.memmap(path, dtype=np.uint16, mode="r")
         self.block_size = block_size
 
     def __getitem__(self, idx):
-        return self.data[idx : idx + self.block_size]
+        return Data(
+            prompt=torch.from_numpy(
+                self._memmap[idx : idx + self.block_size].astype(np.int64)
+            ),
+            target=torch.from_numpy(
+                self._memmap[idx + 1 : idx + self.block_size + 1].astype(np.int64)
+            ),
+            batch_size=[self.block_size],
+        )
 
     def __len__(self):
-        return len(self.data) + 1 - self.block_size
+        return len(self._memmap) - self.block_size
 
 
 class Trainer:
@@ -278,10 +262,10 @@ class Trainer:
 
         data_dir = os.path.join("data", self.dataset)
         self.train_data = PairedDataset(
-            Data.from_file(os.path.join(data_dir, "train.bin")), self.block_size
+            os.path.join(data_dir, "train.bin"), self.block_size
         )
         self.val_data = PairedDataset(
-            Data.from_file(os.path.join(data_dir, "val.bin")), self.block_size
+            os.path.join(data_dir, "val.bin"), self.block_size
         )
 
         self.train_loader_iter = iter(

@@ -8,13 +8,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import wandb
-from model import GPT, GPTConfig
-from tensordict import MemmapTensor
 from tensordict.prototype import tensorclass
 from torch.distributed import destroy_process_group, init_process_group
-from torch.utils.data import DataLoader, Dataset
 from torch.nn.parallel import DistributedDataParallel as DDP
-from utils import dotdict
+from torch.utils.data import DataLoader, Dataset
+
+from model import GPT, GPTConfig
+from utils import load_config
 
 
 class Collate(nn.Module):
@@ -57,8 +57,8 @@ class PairedDataset(Dataset):
 
 class Trainer:
     def __init__(self, config):
-        self.config = config
-        self.from_config(config)
+        self.config = load_config(config)
+        self._from_config(config)
 
         self.model_args = dict(
             n_layer=self.n_layer,
@@ -73,55 +73,53 @@ class Trainer:
         self.iter_num = 0
         self.best_val_loss = float("inf")
 
-    def from_config(self, config):
-        config = dotdict(config)
-
+    def _from_config(self, config):
         # IO
-        self.out_dir = config.out_dir
-        self.eval_interval = config.eval_interval
-        self.log_interval = config.log_interval
-        self.eval_iters = config.eval_iters
-        self.eval_only = config.eval_only
-        self.always_save_checkpoint = config.always_save_checkpoint
-        self.init_from = config.init_from
+        self.out_dir = config["out_dir"]
+        self.eval_interval = config["eval_interval"]
+        self.log_interval = config["log_interval"]
+        self.eval_iters = config["eval_iters"]
+        self.eval_only = config["eval_only"]
+        self.always_save_checkpoint = config["always_save_checkpoint"]
+        self.init_from = config["init_from"]
 
         # wandb
-        self.wandb_log = config.wandb_log
-        self.wandb_project = config.wandb_project
-        self.wandb_run_name = config.wandb_run_name
+        self.wandb_log = config["wandb_log"]
+        self.wandb_project = config["wandb_project"]
+        self.wandb_run_name = config["wandb_run_name"]
 
         # data
-        self.dataset = config.dataset
-        self.gradient_accumulation_steps = config.gradient_accumulation_steps
-        self.batch_size = config.batch_size
-        self.block_size = config.block_size
+        self.dataset = config["dataset"]
+        self.gradient_accumulation_steps = config["gradient_accumulation_steps"]
+        self.batch_size = config["batch_size"]
+        self.block_size = config["block_size"]
 
         # model
-        self.n_layer = config.n_layer
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.dropout = config.dropout
-        self.bias = config.bias
+        self.n_layer = config["n_layer"]
+        self.n_head = config["n_head"]
+        self.n_embd = config["n_embd"]
+        self.dropout = config["dropout"]
+        self.bias = config["bias"]
 
         # optimizer
-        self.learning_rate = config.learning_rate
-        self.max_iters = config.max_iters
-        self.weight_decay = config.weight_decay
-        self.beta1 = config.beta1
-        self.beta2 = config.beta2
-        self.grad_clip = config.grad_clip
-        self.decay_lr = config.decay_lr
-        self.warmup_iters = config.warmup_iters
-        self.lr_decay_iters = config.lr_decay_iters
-        self.min_lr = config.min_lr
+        self.learning_rate = config["learning_rate"]
+        self.max_iters = config["max_iters"]
+        self.weight_decay = config["weight_decay"]
+        self.beta1 = config["beta1"]
+        self.beta2 = config["beta2"]
+        self.grad_clip = config["grad_clip"]
+        self.decay_lr = config["decay_lr"]
+        self.warmup_iters = config["warmup_iters"]
+        self.lr_decay_iters = config["lr_decay_iters"]
+        self.min_lr = config["min_lr"]
 
         # DDP
-        self.backend = config.backend
+        self.backend = config["backend"]
 
         # system
-        self.device = config.device
-        self.dtype = config.dtype
-        self.compile = config.compile
+        self.device = config["device"]
+        self.dtype = config["dtype"]
+        self.compile = config["compile"]
 
         print(self.out_dir)
 
@@ -337,6 +335,7 @@ class Trainer:
                     "config": self.config,
                 }
                 print(f"saving checkpoint to {self.out_dir}")
+
                 torch.save(checkpoint, os.path.join(self.out_dir, "ckpt.pt"))
 
     def train(self):

@@ -147,9 +147,12 @@ class Trainer:
             self.ddp_local_rank = None
 
     def get_batch(self, split):
-        if split == "train":
-            return next(self.train_loader_iter)
-        return next(self.val_loader_iter)
+        # recreate the loader if we run out of data
+        try:
+            return next(getattr(self, f"{split}_loader_iter"))
+        except StopIteration:
+            setattr(self, f"{split}_loader_iter", self._create_loader(split))
+            return next(getattr(self, f"{split}_loader_iter"))
 
     def get_lr(self, it):
         # learning rate decay scheduler (cosine with warmup)
@@ -236,6 +239,17 @@ class Trainer:
 
         return model
 
+    def _create_loader(self, split):
+        data = self.train_data if split == "train" else self.val_data
+        return iter(
+            DataLoader(
+                data,
+                batch_size=self.batch_size,
+                shuffle=True,
+                collate_fn=Collate(self.device),
+            )
+        )
+
     def setup(self):
         if self.master_process:
             os.makedirs(self.out_dir, exist_ok=True)
@@ -266,22 +280,8 @@ class Trainer:
             os.path.join(data_dir, "val.bin"), self.block_size
         )
 
-        self.train_loader_iter = iter(
-            DataLoader(
-                self.train_data,
-                batch_size=self.batch_size,
-                shuffle=True,
-                collate_fn=Collate(device=self.device),
-            )
-        )
-        self.val_loader_iter = iter(
-            DataLoader(
-                self.val_data,
-                batch_size=self.batch_size,
-                shuffle=True,
-                collate_fn=Collate(device=self.device),
-            )
-        )
+        self.train_loader_iter = self._create_loader("train")
+        self.val_loader_iter = self._create_loader("val")
 
         # attempt to derive vocab_size from the dataset
         meta_path = os.path.join(data_dir, "meta.pkl")

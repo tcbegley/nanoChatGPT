@@ -6,14 +6,53 @@ from contextlib import nullcontext
 
 import numpy as np
 import torch
+import torch.nn as nn
 import wandb
-import yaml
+from tensordict.prototype import tensorclass
 from torch.distributed import destroy_process_group, init_process_group
-from torch.nn import functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, Dataset
 
-from model import GPT, RLHF, GPTConfig
+from model import GPT, GPTConfig
 from utils import load_config
+
+
+class Collate(nn.Module):
+    def __init__(self, device="cpu"):
+        super().__init__()
+        self.device = torch.device(device)
+
+    def __call__(self, batch):
+        batch = torch.stack(batch, dim=0)
+        if self.device.type == "cuda":
+            batch = batch.pin_memory()
+        return batch.to(self.device)
+
+
+@tensorclass
+class Data:
+    prompt: torch.Tensor
+    target: torch.Tensor
+
+
+class PairedDataset(Dataset):
+    def __init__(self, path, block_size):
+        self._memmap = np.memmap(path, dtype=np.uint16, mode="r")
+        self.block_size = block_size
+
+    def __getitem__(self, idx):
+        return Data(
+            prompt=torch.from_numpy(
+                self._memmap[idx : idx + self.block_size].astype(np.int64)
+            ),
+            target=torch.from_numpy(
+                self._memmap[idx + 1 : idx + self.block_size + 1].astype(np.int64)
+            ),
+            batch_size=[self.block_size],
+        )
+
+    def __len__(self):
+        return len(self._memmap) - self.block_size
 
 
 class Trainer:
@@ -108,30 +147,9 @@ class Trainer:
             self.ddp_local_rank = None
 
     def get_batch(self, split):
-        data = self.train_data if split == "train" else self.val_data
-        ix = torch.randint(len(data) - self.block_size, (self.batch_size,))
-        x = torch.stack(
-            [
-                torch.from_numpy((data[i : i + self.block_size]).astype(np.int64))
-                for i in ix
-            ]
-        )
-        y = torch.stack(
-            [
-                torch.from_numpy(
-                    (data[i + 1 : i + 1 + self.block_size]).astype(np.int64)
-                )
-                for i in ix
-            ]
-        )
-        if self.device_type == "cuda":
-            # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-            x, y = x.pin_memory().to(self.device, non_blocking=True), y.pin_memory().to(
-                self.device, non_blocking=True
-            )
-        else:
-            x, y = x.to(self.device), y.to(self.device)
-        return x, y
+        if split == "train":
+            return next(self.train_loader_iter)
+        return next(self.val_loader_iter)
 
     def get_lr(self, it):
         # learning rate decay scheduler (cosine with warmup)
@@ -240,13 +258,29 @@ class Trainer:
             else torch.amp.autocast(device_type=self.device_type, dtype=ptdtype)
         )
 
-        # poor man's data loader
         data_dir = os.path.join("data", self.dataset)
-        self.train_data = np.memmap(
-            os.path.join(data_dir, "train.bin"), dtype=np.uint16, mode="r"
+        self.train_data = PairedDataset(
+            os.path.join(data_dir, "train.bin"), self.block_size
         )
-        self.val_data = np.memmap(
-            os.path.join(data_dir, "val.bin"), dtype=np.uint16, mode="r"
+        self.val_data = PairedDataset(
+            os.path.join(data_dir, "val.bin"), self.block_size
+        )
+
+        self.train_loader_iter = iter(
+            DataLoader(
+                self.train_data,
+                batch_size=self.batch_size,
+                shuffle=True,
+                collate_fn=Collate(device=self.device),
+            )
+        )
+        self.val_loader_iter = iter(
+            DataLoader(
+                self.val_data,
+                batch_size=self.batch_size,
+                shuffle=True,
+                collate_fn=Collate(device=self.device),
+            )
         )
 
         # attempt to derive vocab_size from the dataset
@@ -337,7 +371,7 @@ class Trainer:
             )
 
         # training loop
-        X, Y = self.get_batch("train")  # fetch the very first batch
+        batch = self.get_batch("train")  # fetch the very first batch
         t0 = time.time()
         local_iter_num = 0  # number of iterations in the lifetime of this process
         running_mfu = -1.0
@@ -367,9 +401,10 @@ class Trainer:
                         micro_step == self.gradient_accumulation_steps - 1
                     )
                 with ctx:
-                    logits, loss = model(X, Y)
+                    # TODO: use TensorDictModule
+                    logits, loss = model(batch.prompt, batch.target)
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                X, Y = self.get_batch("train")
+                batch = self.get_batch("train")
                 # backward pass, with gradient scaling if training in fp16
                 scaler.scale(loss).backward()
             # clip the gradient
@@ -419,9 +454,9 @@ class Trainer:
         for split in ["train", "val"]:
             losses = torch.zeros(self.eval_iters)
             for k in range(self.eval_iters):
-                X, Y = self.get_batch(split)
+                batch = self.get_batch(split)
                 with ctx:
-                    logits, loss = model(X, Y)
+                    logits, loss = model(batch.prompt, batch.target)
                 losses[k] = loss.item()
             out[split] = losses.mean()
         model.train()

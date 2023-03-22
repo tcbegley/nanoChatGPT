@@ -58,7 +58,7 @@ class PairedDataset(Dataset):
 class Trainer:
     def __init__(self, config):
         self.config = load_config(config)
-        self._from_config(config)
+        self._from_config(self.config)
 
         self.model_args = dict(
             n_layer=self.n_layer,

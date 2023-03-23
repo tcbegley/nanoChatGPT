@@ -3,11 +3,13 @@ import os
 import pickle
 import time
 from contextlib import nullcontext
+from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 import wandb
+from tensordict.nn import TensorDictModule
 from tensordict.prototype import tensorclass
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -23,7 +25,8 @@ class Collate(nn.Module):
         self.device = torch.device(device)
 
     def __call__(self, batch):
-        batch = torch.stack(batch, dim=0)
+        batch = torch.stack(batch, dim=0).contiguous()
+        batch.batch_size = []
         if self.device.type == "cuda":
             batch = batch.pin_memory()
         return batch.to(self.device)
@@ -33,6 +36,8 @@ class Collate(nn.Module):
 class Data:
     prompt: torch.Tensor
     target: torch.Tensor
+    logits: Optional[torch.Tensor] = None
+    loss: Optional[torch.Tensor] = None
 
 
 class PairedDataset(Dataset):
@@ -370,6 +375,7 @@ class Trainer:
                 project=self.wandb_project, name=self.wandb_run_name, config=self.config
             )
 
+        model = TensorDictModule(model, ["prompt", "target"], ["logits", "loss"])
         # training loop
         batch = self.get_batch("train")  # fetch the very first batch
         t0 = time.time()
@@ -402,11 +408,11 @@ class Trainer:
                     )
                 with ctx:
                     # TODO: use TensorDictModule
-                    logits, loss = model(batch.prompt, batch.target)
+                    model(batch)
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
                 batch = self.get_batch("train")
                 # backward pass, with gradient scaling if training in fp16
-                scaler.scale(loss).backward()
+                scaler.scale(batch.loss).backward()
             # clip the gradient
             if self.grad_clip != 0.0:
                 scaler.unscale_(self.optimizer)
@@ -422,7 +428,7 @@ class Trainer:
             dt = t1 - t0
             t0 = t1
             if self.iter_num % self.log_interval == 0 and self.master_process:
-                lossf = loss.item()  # loss as float. note: this is a CPU-GPU sync point
+                lossf = batch.loss.item()  # loss as float. note: this is a CPU-GPU sync point
                 if local_iter_num >= 5:  # let the training loop settle a bit
                     mfu = model.estimate_mfu(
                         self.batch_size
@@ -456,8 +462,8 @@ class Trainer:
             for k in range(self.eval_iters):
                 batch = self.get_batch(split)
                 with ctx:
-                    logits, loss = model(batch.prompt, batch.target)
-                losses[k] = loss.item()
+                    model(batch)
+                losses[k] = batch.loss.item()
             out[split] = losses.mean()
         model.train()
         return out

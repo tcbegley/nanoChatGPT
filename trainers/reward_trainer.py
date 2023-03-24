@@ -1,17 +1,17 @@
 import os
 import time
+from typing import Optional
 
-import numpy as np
 import tiktoken
 import torch
 import wandb
+from tensordict.nn import TensorDictModule
+from tensordict.prototype import tensorclass
 from torch.distributed import destroy_process_group
 from torch.utils.data import DataLoader
 
 from model import RLHF
 from trainers.trainer import Trainer
-
-from tensordict.prototype import tensorclass
 
 
 # This one for reward models similar to InstructGPT paper (rewards based on comparisons)
@@ -179,6 +179,8 @@ class RewardModelTrainer(Trainer):
 class RewardData:
     prompt: torch.Tensor
     reward: torch.Tensor
+    logits: Optional[torch.Tensor] = None
+    loss: Optional[torch.Tensor] = None
 
 
 # This one is for reward models which output a probability of reward directly from a
@@ -197,7 +199,7 @@ class ProbRewardModelTrainer(Trainer):
             reward=torch.stack(
                 [self.reward(row) for row in batch.target.unbind(0)], dim=0
             ),
-            batch_size=[len(batch)],
+            batch_size=[],
         )
 
     def reward(self, sequence, t="and"):
@@ -322,6 +324,7 @@ class ProbRewardModelTrainer(Trainer):
                 project=self.wandb_project, name=self.wandb_run_name, config=self.config
             )
 
+        model = TensorDictModule(model, ["prompt", "reward"], ["logits", "loss"])
         # training loop
         batch = self.get_batch("train")  # fetch the very first batch
         t0 = time.time()
@@ -345,9 +348,9 @@ class ProbRewardModelTrainer(Trainer):
             batch = self.get_batch("train")
 
             # evaluate the loss
-            logits, loss = model(batch.prompt, batch.reward)
+            model(batch)
             self.optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            batch.loss.backward()
             self.optimizer.step()
 
             # timing and logging
@@ -363,20 +366,3 @@ class ProbRewardModelTrainer(Trainer):
 
         if self.ddp:
             destroy_process_group()
-
-    # TODO: this won't be necessary once model has been wrapped with TensorDictModule
-    # helps estimate an arbitrarily accurate loss over either split using many batches
-    @torch.no_grad()
-    def estimate_loss(self, model, ctx):
-        out = {}
-        model.eval()
-        for split in ["train", "val"]:
-            losses = torch.zeros(self.eval_iters)
-            for k in range(self.eval_iters):
-                batch = self.get_batch(split)
-                with ctx:
-                    logits, loss = model(batch.prompt, batch.reward)
-                losses[k] = loss.item()
-            out[split] = losses.mean()
-        model.train()
-        return out

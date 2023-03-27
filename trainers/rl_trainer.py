@@ -73,9 +73,16 @@ class PolicyGradientTrainer(Trainer):
         max_iters = 100000
         batch = self.get_batch("train")  # fetch the very first batch
         t0 = time.time()
-        for iter in range(self.config["max_iters"]):
-            log_probs, rewards, advantages = model.generate(
-                batch,
+        for iter in range(max_iters):
+
+            (
+                states,
+                log_probs,
+                log_probs_reference,
+                rewards,
+                advantages,
+            ) = model.module.generate(
+                batch.prompt,
                 self.block_size,
                 self.device,
                 self.block_size,
@@ -105,8 +112,8 @@ class PolicyGradientTrainer(Trainer):
                 current_time = time.time()
                 # print(current_time - last_time)
                 last_time = current_time
-                text = model.generate(
-                    X,
+                text = model.module.generate(
+                    batch.prompt,
                     self.block_size,
                     self.device,
                     self.block_size,
@@ -191,6 +198,8 @@ class GumbelTrainer(Trainer):
         rl_model.to(self.device)
         reward_model.to(self.device)
 
+        rl_model = TensorDictModule(rl_model, ["prompt", "target"], ["logits", "loss"])
+
         gumbel_optimizer = torch.optim.AdamW(rl_model.parameters(), lr=1e-3)
 
         # initialize a GradScaler. If enabled=False scaler is a no-op
@@ -202,7 +211,9 @@ class GumbelTrainer(Trainer):
 
         next_batch = self.get_batch("train")  # fetch the very first batch
 
-        next_batch.prompt = torch.zeros((next_batch.prompt.shape[0], 1), dtype=torch.long).to(
+        next_batch.prompt = torch.zeros(
+            (next_batch.prompt.shape[0], 1), dtype=torch.long
+        ).to(
             self.device
         )  # for now there is no prompt
 
@@ -219,8 +230,8 @@ class GumbelTrainer(Trainer):
                         micro_step == self.gradient_accumulation_steps - 1
                     )
                 with ctx:
-                    rewards = rl_model.generate_gumbel(
-                        batch,
+                    states, rewards = rl_model.module.generate_gumbel(
+                        batch.prompt,
                         self.config["episode_length"],
                         self.device,
                         self.block_size,
@@ -229,7 +240,7 @@ class GumbelTrainer(Trainer):
                     mean_reward = rewards.mean()
                     loss = -mean_reward
                     # # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                    next_batch = self.get_batch('train')
+                    next_batch = self.get_batch("train")
                     # backward pass, with gradient scaling if training in fp16
                     scaler.scale(loss).backward()
 

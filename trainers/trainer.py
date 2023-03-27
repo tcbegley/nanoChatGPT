@@ -12,6 +12,7 @@ from tensordict.prototype import tensorclass
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, Dataset
+from typing import Optional
 
 from model import GPT, GPTConfig
 from utils import load_config
@@ -33,6 +34,8 @@ class Collate(nn.Module):
 class Data:
     prompt: torch.Tensor
     target: torch.Tensor
+    loss: Optional[torch.Tensor] = None
+    logits: Optional[torch.Tensor] = None
 
 
 class PairedDataset(Dataset):

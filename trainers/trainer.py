@@ -212,10 +212,13 @@ class Trainer:
             state_dict = checkpoint["model"]
             # fix the keys of the state dictionary :(
             # honestly no idea how checkpoints sometimes get this prefix, have to debug more
-            unwanted_prefix = "_orig_mod."
-            for k, v in list(state_dict.items()):
-                if k.startswith(unwanted_prefix):
-                    state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+            # stripping module. that gets prepended by the state dict of the
+            # TensorDictModule
+            unwanted_prefixes = ["_orig_mod.", "module."]
+            for unwanted_prefix in unwanted_prefixes:
+                for k, v in list(state_dict.items()):
+                    if k.startswith(unwanted_prefix):
+                        state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
             model.load_state_dict(state_dict)
             self.iter_num = checkpoint["iter_num"]
             self.best_val_loss = checkpoint["best_val_loss"]
@@ -224,7 +227,7 @@ class Trainer:
             print(f"Initializing from OpenAI GPT-2 weights: {self.init_from}")
             # initialize from OpenAI GPT-2 weights
             override_args = dict(dropout=self.dropout)
-            model = GPT.from_pretrained(init_from, override_args)
+            model = GPT.from_pretrained(self.init_from, override_args)
             # read off the created config params, so we can store them into checkpoint correctly
             for k in [
                 "n_layer",
@@ -377,7 +380,7 @@ class Trainer:
 
         model = TensorDictModule(model, ["prompt", "target"], ["logits", "loss"])
         # training loop
-        batch = self.get_batch("train")  # fetch the very first batch
+        next_batch = self.get_batch("train")  # fetch the very first batch
         t0 = time.time()
         local_iter_num = 0  # number of iterations in the lifetime of this process
         running_mfu = -1.0
@@ -398,6 +401,7 @@ class Trainer:
             # forward backward update, with optional gradient accumulation to simulate larger batch size
             # and using the GradScaler if data type is float16
             for micro_step in range(self.gradient_accumulation_steps):
+                batch = next_batch
                 if self.ddp:
                     # in DDP training we only need to sync gradients at the last micro step.
                     # the official way to do this is with model.no_sync() context manager, but
@@ -410,7 +414,7 @@ class Trainer:
                     # TODO: use TensorDictModule
                     model(batch)
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                batch = self.get_batch("train")
+                next_batch = self.get_batch("train")
                 # backward pass, with gradient scaling if training in fp16
                 scaler.scale(batch.loss).backward()
             # clip the gradient

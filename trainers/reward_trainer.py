@@ -1,10 +1,12 @@
 import os
 import time
+from typing import Optional
 
-import numpy as np
 import tiktoken
 import torch
 import wandb
+from tensordict.nn import TensorDictModule
+from tensordict.prototype import tensorclass
 from torch.distributed import destroy_process_group
 from torch.utils.data import DataLoader
 
@@ -173,6 +175,14 @@ class RewardModelTrainer(Trainer):
             destroy_process_group()
 
 
+@tensorclass
+class RewardData:
+    prompt: torch.Tensor
+    reward: torch.Tensor
+    logits: Optional[torch.Tensor] = None
+    loss: Optional[torch.Tensor] = None
+
+
 # This one is for reward models which output a probability of reward directly from a
 # given text (no comparison)
 class ProbRewardModelTrainer(Trainer):
@@ -182,12 +192,22 @@ class ProbRewardModelTrainer(Trainer):
         self.mode = "reward"
         self.discrete_reward = discrete_reward
 
+    def get_batch(self, split):
+        batch = super().get_batch(split)
+        return RewardData(
+            prompt=batch.prompt,
+            reward=torch.stack(
+                [self.reward(row) for row in batch.target.unbind(0)], dim=0
+            ),
+            batch_size=[],
+        )
+
     def reward(self, sequence, t="and"):
         if t in self.enc.decode(sequence.tolist()):
             # print('hello')
-            return torch.tensor([0.0, 1.0])
+            return torch.tensor([0.0, 1.0], device=self.device)
         else:
-            return torch.tensor([1.0, 0.0])
+            return torch.tensor([1.0, 0.0], device=self.device)
 
     def evaluate(self, model, ctx, X, lr):
         losses = self.estimate_loss(model, ctx)
@@ -304,6 +324,7 @@ class ProbRewardModelTrainer(Trainer):
                 project=self.wandb_project, name=self.wandb_run_name, config=self.config
             )
 
+        model = TensorDictModule(model, ["prompt", "reward"], ["logits", "loss"])
         # training loop
         batch = self.get_batch("train")  # fetch the very first batch
         t0 = time.time()
@@ -327,9 +348,9 @@ class ProbRewardModelTrainer(Trainer):
             batch = self.get_batch("train")
 
             # evaluate the loss
-            logits, loss = model(batch.prompt, batch.target)
+            model(batch)
             self.optimizer.zero_grad(set_to_none=True)
-            loss.backward()
+            batch.loss.backward()
             self.optimizer.step()
 
             # timing and logging

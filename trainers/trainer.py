@@ -3,11 +3,13 @@ import os
 import pickle
 import time
 from contextlib import nullcontext
+from typing import Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
 import wandb
+from tensordict.nn import TensorDictModule
 from tensordict.prototype import tensorclass
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -23,7 +25,8 @@ class Collate(nn.Module):
         self.device = torch.device(device)
 
     def __call__(self, batch):
-        batch = torch.stack(batch, dim=0)
+        batch = torch.stack(batch, dim=0).contiguous()
+        batch.batch_size = []
         if self.device.type == "cuda":
             batch = batch.pin_memory()
         return batch.to(self.device)
@@ -33,6 +36,8 @@ class Collate(nn.Module):
 class Data:
     prompt: torch.Tensor
     target: torch.Tensor
+    logits: Optional[torch.Tensor] = None
+    loss: Optional[torch.Tensor] = None
 
 
 class PairedDataset(Dataset):
@@ -147,9 +152,12 @@ class Trainer:
             self.ddp_local_rank = None
 
     def get_batch(self, split):
-        if split == "train":
-            return next(self.train_loader_iter)
-        return next(self.val_loader_iter)
+        # recreate the loader if we run out of data
+        try:
+            return next(getattr(self, f"{split}_loader_iter"))
+        except StopIteration:
+            setattr(self, f"{split}_loader_iter", self._create_loader(split))
+            return next(getattr(self, f"{split}_loader_iter"))
 
     def get_lr(self, it):
         # learning rate decay scheduler (cosine with warmup)
@@ -204,10 +212,13 @@ class Trainer:
             state_dict = checkpoint["model"]
             # fix the keys of the state dictionary :(
             # honestly no idea how checkpoints sometimes get this prefix, have to debug more
-            unwanted_prefix = "_orig_mod."
-            for k, v in list(state_dict.items()):
-                if k.startswith(unwanted_prefix):
-                    state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+            # stripping module. that gets prepended by the state dict of the
+            # TensorDictModule
+            unwanted_prefixes = ["_orig_mod.", "module."]
+            for unwanted_prefix in unwanted_prefixes:
+                for k, v in list(state_dict.items()):
+                    if k.startswith(unwanted_prefix):
+                        state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
             model.load_state_dict(state_dict)
             self.iter_num = checkpoint["iter_num"]
             self.best_val_loss = checkpoint["best_val_loss"]
@@ -216,7 +227,7 @@ class Trainer:
             print(f"Initializing from OpenAI GPT-2 weights: {self.init_from}")
             # initialize from OpenAI GPT-2 weights
             override_args = dict(dropout=self.dropout)
-            model = GPT.from_pretrained(init_from, override_args)
+            model = GPT.from_pretrained(self.init_from, override_args)
             # read off the created config params, so we can store them into checkpoint correctly
             for k in [
                 "n_layer",
@@ -235,6 +246,17 @@ class Trainer:
             ] = self.block_size  # so that the checkpoint will have the right value
 
         return model
+
+    def _create_loader(self, split):
+        data = self.train_data if split == "train" else self.val_data
+        return iter(
+            DataLoader(
+                data,
+                batch_size=self.batch_size,
+                shuffle=True,
+                collate_fn=Collate(self.device),
+            )
+        )
 
     def setup(self):
         if self.master_process:
@@ -266,22 +288,8 @@ class Trainer:
             os.path.join(data_dir, "val.bin"), self.block_size
         )
 
-        self.train_loader_iter = iter(
-            DataLoader(
-                self.train_data,
-                batch_size=self.batch_size,
-                shuffle=True,
-                collate_fn=Collate(device=self.device),
-            )
-        )
-        self.val_loader_iter = iter(
-            DataLoader(
-                self.val_data,
-                batch_size=self.batch_size,
-                shuffle=True,
-                collate_fn=Collate(device=self.device),
-            )
-        )
+        self.train_loader_iter = self._create_loader("train")
+        self.val_loader_iter = self._create_loader("val")
 
         # attempt to derive vocab_size from the dataset
         meta_path = os.path.join(data_dir, "meta.pkl")
@@ -370,8 +378,9 @@ class Trainer:
                 project=self.wandb_project, name=self.wandb_run_name, config=self.config
             )
 
+        model = TensorDictModule(model, ["prompt", "target"], ["logits", "loss"])
         # training loop
-        batch = self.get_batch("train")  # fetch the very first batch
+        next_batch = self.get_batch("train")  # fetch the very first batch
         t0 = time.time()
         local_iter_num = 0  # number of iterations in the lifetime of this process
         running_mfu = -1.0
@@ -392,6 +401,7 @@ class Trainer:
             # forward backward update, with optional gradient accumulation to simulate larger batch size
             # and using the GradScaler if data type is float16
             for micro_step in range(self.gradient_accumulation_steps):
+                batch = next_batch
                 if self.ddp:
                     # in DDP training we only need to sync gradients at the last micro step.
                     # the official way to do this is with model.no_sync() context manager, but
@@ -402,11 +412,11 @@ class Trainer:
                     )
                 with ctx:
                     # TODO: use TensorDictModule
-                    logits, loss = model(batch.prompt, batch.target)
+                    model(batch)
                 # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                batch = self.get_batch("train")
+                next_batch = self.get_batch("train")
                 # backward pass, with gradient scaling if training in fp16
-                scaler.scale(loss).backward()
+                scaler.scale(batch.loss).backward()
             # clip the gradient
             if self.grad_clip != 0.0:
                 scaler.unscale_(self.optimizer)
@@ -422,7 +432,7 @@ class Trainer:
             dt = t1 - t0
             t0 = t1
             if self.iter_num % self.log_interval == 0 and self.master_process:
-                lossf = loss.item()  # loss as float. note: this is a CPU-GPU sync point
+                lossf = batch.loss.item()  # loss as float. note: this is a CPU-GPU sync point
                 if local_iter_num >= 5:  # let the training loop settle a bit
                     mfu = model.estimate_mfu(
                         self.batch_size
@@ -456,8 +466,8 @@ class Trainer:
             for k in range(self.eval_iters):
                 batch = self.get_batch(split)
                 with ctx:
-                    logits, loss = model(batch.prompt, batch.target)
-                losses[k] = loss.item()
+                    model(batch)
+                losses[k] = batch.loss.item()
             out[split] = losses.mean()
         model.train()
         return out

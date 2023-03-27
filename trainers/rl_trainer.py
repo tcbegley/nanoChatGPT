@@ -3,6 +3,7 @@ import time
 
 import numpy as np
 import torch
+from tensordict.nn import TensorDictModule
 from torch.distributed import destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -20,14 +21,12 @@ class PolicyGradientTrainer(Trainer):
         self.mode = "RL"
 
     def train(self):
-
         self.setup_ddp()
 
         ctx, meta_vocab_size = self.setup()
 
         # model init
         model = self.init_model()
-
         model = RLHF(model, self.mode, discrete_reward=self.config["discrete_reward"])
 
         if self.config["init_multihead_from"] == "scratch":
@@ -67,10 +66,12 @@ class PolicyGradientTrainer(Trainer):
         # actor_optimizer = torch.optim.AdamW(model.model.policy_head.parameters(), lr=1e-2)
         actor_optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
+        model = TensorDictModule(model, ["prompt", "target"], ["logits", "loss"])
+
         last_time = time.time()
         rews_all = []
         max_iters = 100000
-        X, Y = self.get_batch("train")  # fetch the very first batch
+        batch = self.get_batch("train")  # fetch the very first batch
         t0 = time.time()
         for iter in range(max_iters):
 
@@ -80,8 +81,8 @@ class PolicyGradientTrainer(Trainer):
                 log_probs_reference,
                 rewards,
                 advantages,
-            ) = model.generate(
-                X,
+            ) = model.module.generate(
+                batch.prompt,
                 self.block_size,
                 self.device,
                 self.block_size,
@@ -111,8 +112,8 @@ class PolicyGradientTrainer(Trainer):
                 current_time = time.time()
                 # print(current_time - last_time)
                 last_time = current_time
-                text = model.generate(
-                    X,
+                text = model.module.generate(
+                    batch.prompt,
                     self.block_size,
                     self.device,
                     self.block_size,
@@ -186,15 +187,18 @@ class GumbelTrainer(Trainer):
             state_dict = checkpoint["model"]
             # fix the keys of the state dictionary :(
             # honestly no idea how checkpoints sometimes get this prefix, have to debug more
-            unwanted_prefix = "_orig_mod."
-            for k, v in list(state_dict.items()):
-                if k.startswith(unwanted_prefix):
-                    state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+            unwanted_prefixes = ["_orig_mod.", "module."]
+            for unwanted_prefix in unwanted_prefixes:
+                for k, v in list(state_dict.items()):
+                    if k.startswith(unwanted_prefix):
+                        state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
             reward_model.load_state_dict(state_dict)
         else:
             reward_model = rl_model
         rl_model.to(self.device)
         reward_model.to(self.device)
+
+        rl_model = TensorDictModule(rl_model, ["prompt", "target"], ["logits", "loss"])
 
         gumbel_optimizer = torch.optim.AdamW(rl_model.parameters(), lr=1e-3)
 
@@ -205,16 +209,18 @@ class GumbelTrainer(Trainer):
         rews_all = []
         max_iters = 100000
 
-        X, Y = self.get_batch("train")  # fetch the very first batch
+        next_batch = self.get_batch("train")  # fetch the very first batch
 
-        X = torch.zeros((X.shape[0], 1), dtype=torch.long).to(
+        next_batch.prompt = torch.zeros(
+            (next_batch.prompt.shape[0], 1), dtype=torch.long
+        ).to(
             self.device
         )  # for now there is no prompt
 
         t0 = time.time()
         for iter in range(max_iters):
-
             for micro_step in range(self.gradient_accumulation_steps):
+                batch = next_batch
                 if self.ddp:
                     # in DDP training we only need to sync gradients at the last micro step.
                     # the official way to do this is with model.no_sync() context manager, but
@@ -224,8 +230,8 @@ class GumbelTrainer(Trainer):
                         micro_step == self.gradient_accumulation_steps - 1
                     )
                 with ctx:
-                    states, rewards = rl_model.generate_gumbel(
-                        X,
+                    states, rewards = rl_model.module.generate_gumbel(
+                        batch.prompt,
                         self.config["episode_length"],
                         self.device,
                         self.block_size,
@@ -234,7 +240,7 @@ class GumbelTrainer(Trainer):
                     mean_reward = rewards.mean()
                     loss = -mean_reward
                     # # immediately async prefetch next batch while model is doing the forward pass on the GPU
-                    # X, Y = self.get_batch('train')
+                    next_batch = self.get_batch("train")
                     # backward pass, with gradient scaling if training in fp16
                     scaler.scale(loss).backward()
 
@@ -258,7 +264,7 @@ class GumbelTrainer(Trainer):
                 # print(current_time - last_time)
                 last_time = current_time
                 text = rl_model.generate(
-                    X,
+                    batch.prompt,
                     self.config["episode_length"],
                     self.device,
                     self.block_size,

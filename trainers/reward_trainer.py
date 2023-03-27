@@ -205,9 +205,9 @@ class ProbRewardModelTrainer(Trainer):
     def reward(self, sequence, t="and"):
         if t in self.enc.decode(sequence.tolist()):
             # print('hello')
-            return torch.tensor([0.0, 1.0])
+            return torch.tensor([0.0, 1.0], device=self.device)
         else:
-            return torch.tensor([1.0, 0.0])
+            return torch.tensor([1.0, 0.0], device=self.device)
 
     def evaluate(self, model, ctx, X, lr):
         losses = self.estimate_loss(model, ctx)

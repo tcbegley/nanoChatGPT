@@ -514,28 +514,18 @@ class RLHF(nn.Module):
 
     def generate(
         self,
-        idx,
+        batch,
         max_new_tokens,
         device,
         block_size,
-        use_reference=True,
         reward_model=None,
         hard_code_reward=True,
     ):
         # idx is (B, T) array of indices in the current context
         log_probs = torch.tensor([]).to(device)
-        log_probs_ref = torch.tensor([]).to(device)
-        values = torch.tensor([]).to(device)
 
-        idx_cond_all = torch.zeros((idx.shape[0], block_size, max_new_tokens)).to(
-            device
-        )
-        values_all = torch.zeros((idx.shape[0], max_new_tokens)).to(device)
-        actions_all = torch.zeros((idx.shape[0], max_new_tokens)).to(device)
-        rewards_all = torch.zeros((idx.shape[0],)).to(device)
-        log_probs_all = torch.zeros((idx.shape[0], max_new_tokens)).to(device)
-        advantages_all = torch.zeros((idx.shape[0], max_new_tokens)).to(device)
-        returns_all = torch.zeros((idx.shape[0], max_new_tokens)).to(device)
+        values_all = torch.zeros((batch.shape[0], max_new_tokens)).to(device)
+        advantages_all = torch.zeros((batch.shape[0], max_new_tokens)).to(device)
         gamma = 1
         lam = 1
 
@@ -543,13 +533,13 @@ class RLHF(nn.Module):
         for i in range(max_new_tokens):
             # crop idx to the last block_size tokens
             # block_size = 256
-            idx_cond = idx[:, -block_size:]
+            idx_cond = batch.prompt[:, -block_size:]
 
             # get the predictions
-            logits, loss = self(idx_cond)
+            self(idx_cond)
 
             # focus only on the last time step
-            logits = logits[:, -1, :]  # becomes (B, C)
+            logits = idx_cond.logits[:, -1, :]  # becomes (B, C)
             # apply softmax to get probabilities
 
             probs_next = F.softmax(logits, dim=-1)  # (B, C)
@@ -560,18 +550,8 @@ class RLHF(nn.Module):
             log_probs_idx_next = torch.log(probs_idx_next)
             log_probs = torch.cat((log_probs, log_probs_idx_next), dim=1)
 
-            if use_reference:
-                logits_ref, _ = self.model(idx_cond)
-                logits_ref = logits_ref[:, -1, :]  # becomes (B, C)
-                probs_ref_next = F.softmax(logits_ref, dim=-1)  # (B, C)
-                probs_ref_idx_next = torch.gather(probs_ref_next, 1, idx_next)
-                log_probs_ref_idx_next = torch.log(probs_ref_idx_next)
-                log_probs_ref = torch.cat(
-                    (log_probs_ref, log_probs_ref_idx_next), dim=1
-                )
-
             # append sampled index to the running sequence
-            idx = torch.cat((idx, idx_next), dim=1)  # (B, T+1)
+            idx = torch.cat((batch.prompt, idx_next), dim=1)  # (B, T+1)
 
             if i == max_new_tokens - 1:
                 states = idx[:, -max_new_tokens:]
@@ -602,31 +582,24 @@ class RLHF(nn.Module):
                         advantages_all[:, t] = (
                             delta + gamma * lam * advantages_all[:, t + 1]
                         )
-                        # returns_all[:, t] += gamma * returns_all[:, t + 1]
 
-        return (
-            idx,
-            log_probs[:, -max_new_tokens:],
-            log_probs_ref[:, -max_new_tokens:],
-            rewards,
-            advantages_all,
-        )
+        return log_probs[:, -max_new_tokens:], rewards, advantages_all
 
     def generate_gumbel(
-        self, idx, max_new_tokens, device, block_size, reward_model, use_reference=True
+        self, batch, max_new_tokens, device, block_size, reward_model, use_reference=True
     ):
 
         onehot = torch.tensor([]).to(device)
         for i in range(max_new_tokens):
             # crop idx to the last block_size tokens
             # block_size = 256
-            idx_cond = idx[:, -block_size:]
+            idx_cond = batch.prompt[:, -block_size:]
 
             # get the predictions
-            logits, loss = self(idx_cond)
+            self(idx_cond)
 
             # focus only on the last time step
-            logits = logits[:, -1, :]  # becomes (B, C)
+            logits = idx_cond.logits[:, -1, :]  # becomes (B, C)
 
             # gumbel sample
             idx_next, onehot_next = self.gumbel_softmax(
@@ -634,7 +607,7 @@ class RLHF(nn.Module):
             )
 
             # append sampled index to the running sequence
-            idx = torch.cat((idx, idx_next), dim=1)  # (B, T+1)
+            idx = torch.cat((batch.prompt, idx_next), dim=1)  # (B, T+1)
 
             onehot = torch.cat((onehot, onehot_next), dim=2)  # (B, T+1)
 
